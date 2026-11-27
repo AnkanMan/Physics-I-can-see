@@ -31,10 +31,18 @@ input:focus-visible,button:focus-visible{outline:2px solid #ff85c8;outline-offse
 </style></head>
 <body><main><div class="eyebrow">VICSEK / COLLECTIVE MOTION</div><h1>Simple rules. Moving together.</h1>
 <div class="panel"><canvas id="scene" role="img" aria-label="Vicsek particles in a periodic two-dimensional box, with heading arrows and an alignment history"></canvas>
-<div class="controls"><div class="parameters"><fieldset><legend>Particles and box</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="n">Count N<input id="n" type="number" step="1"></label><label for="box">Box size L<input id="box" type="number" step="1"></label></div></fieldset><fieldset><legend>Motion and neighbors</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="speed">Speed v₀<input id="speed" type="number" step="0.05"></label><label for="radius">Radius R<input id="radius" type="number" step="0.1"></label></div></fieldset><fieldset><legend>Random turning</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="noise">Noise rate η<input id="noise" type="number" step="0.1"></label><label for="dt">Time step Δt<input id="dt" type="number" step="0.1"></label></div></fieldset><fieldset><legend>Duration and seed</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="steps">Steps<input id="steps" type="number" step="10"></label><label for="seed">Random seed<input id="seed" type="number" step="1"></label></div></fieldset></div><div id="error" role="status"></div>
+<div style="padding:16px 22px;border-top:1px solid #23384f"><strong style="color:#6ce6ef">KDE mean velocity</strong><span style="color:#879bb5;font-size:12px"> · synchronized with the particle timeline</span></div>
+<canvas id="kde-scene" role="img" aria-label="Animated periodic KDE average velocity field"></canvas>
+<div class="controls"><fieldset style="margin-bottom:18px"><legend>KDE field</legend><div class="components" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr))">
+<label for="kde-width">Width h/L<input id="kde-width" type="number" min="0.01" max="0.5" step="0.01" value="0.06"></label>
+<label for="kde-grid">Grid points / side<input id="kde-grid" type="number" min="12" max="48" step="2" value="24"></label>
+<label for="kde-window">Trailing window Δt<input id="kde-window" type="number" min="0" step="0.05" value="0"></label>
+<label for="kde-floor">Density floor / (N/L²)<input id="kde-floor" type="number" min="0" max="1" step="0.01" value="0.05"></label>
+<label for="kde-visible">Show KDE<input id="kde-visible" type="checkbox" checked></label></div><div id="kde-error" role="status" style="color:#ffb3bd;font-size:12px;margin-top:8px"></div></fieldset>
+<div class="parameters"><fieldset><legend>Particles and box</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="n">Count N<input id="n" type="number" step="1"></label><label for="box">Box size L<input id="box" type="number" step="1"></label></div></fieldset><fieldset><legend>Motion and neighbors</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="speed">Speed v₀<input id="speed" type="number" step="0.05"></label><label for="radius">Radius R<input id="radius" type="number" step="0.1"></label></div></fieldset><fieldset><legend>Random turning</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="noise">Noise rate η<input id="noise" type="number" step="0.1"></label><label for="dt">Time step Δt<input id="dt" type="number" step="0.1"></label></div></fieldset><fieldset><legend>Duration and seed</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="steps">Steps<input id="steps" type="number" step="10"></label><label for="seed">Random seed<input id="seed" type="number" step="1"></label></div></fieldset></div><div id="error" role="status"></div>
 <div class="transport"><button id="play" type="button">Play</button><button id="restart" type="button">Restart</button>
 <div class="timeline"><label for="time">Time</label><input id="time" type="range" min="0" step="0.01" value="0"></div><span id="clock">0.00</span></div>
-<div class="note">Edit any value to recalculate and restart. Arrows show heading; colors show direction.<br>Periodic boundaries connect opposite sides. Turning noise is multiplied by Δt; positions advance with the current velocity.</div>
+<div class="note">Edit any value to recalculate and restart. Long runs are precomputed with progress and cancellation on input changes. Up to 100,000 steps and one billion N²-step operations; about 2,001 frames are retained. Playback sampling does not change the physics time step. Arrows show heading; colors show direction.<br>KDE controls redraw the field without recalculating particle motion. Colors show mean-velocity magnitude, arrows show its direction; a trailing window samples up to seven recorded snapshots. Browser changes do not alter the notebook or MP4.<br>Periodic boundaries connect opposite sides. Turning noise is multiplied by Δt; positions advance with the current velocity.</div>
 </div></div></main>
 <script>
 'use strict';
@@ -46,15 +54,27 @@ const inputs=ids.map(id=>document.getElementById(id));inputs.forEach((el,i)=>el.
 const timeSlider=document.getElementById('time'),play=document.getElementById('play');
 let active=null,data=null,currentTime=0,playing=false,lastStamp=null;
 function randomGenerator(seed){let state=seed>>>0;return ()=>{state=(state+0x6D2B79F5)>>>0;let z=state;z=Math.imul(z^(z>>>15),z|1);z^=z+Math.imul(z^(z>>>7),z|61);return ((z^(z>>>14))>>>0)/4294967296;};}
-function simulate(c,initial=null,noiseTape=null){
- const rng=randomGenerator(c.seed),N=c.N,frames=c.steps+1;
+function* simulationSteps(c,initial=null,noiseTape=null){
+ const rng=randomGenerator(c.seed),N=c.N,frames=2;
+ const stride=Math.max(1,Math.ceil(c.steps/2000)),savedFrames=Math.ceil(c.steps/stride)+1;
+ const sampleSteps=new Uint32Array(savedFrames);let savedIndex=0,chunkStarted=performance.now();
+ const chunkSteps=Math.max(1,Math.min(250,Math.floor(500000/(N*N))));
+ const saved={xs:new Float64Array(savedFrames*N*2),angles:new Float64Array(savedFrames*N*1),order:new Float64Array(savedFrames)};
+ function takeSnapshot(frame,step){
+  sampleSteps[savedIndex]=step;
+  saved.xs.set(xs.subarray(frame*N*2,(frame+1)*N*2),savedIndex*N*2);
+  saved.angles.set(angles.subarray(frame*N*1,(frame+1)*N*1),savedIndex*N*1);
+  saved.order[savedIndex]=order[frame];
+  savedIndex++;
+ }
+
  const xs=new Float64Array(frames*N*2),angles=new Float64Array(frames*N),order=new Float64Array(frames);
  for(let i=0;i<N;i++){xs[2*i]=initial?initial.x[i][0]:rng()*c.L;xs[2*i+1]=initial?initial.x[i][1]:rng()*c.L;}
  for(let i=0;i<N;i++)angles[i]=initial?initial.theta[i]:rng()*2*Math.PI;
  function alignment(frame){let cx=0,sy=0;for(let i=0;i<N;i++){cx+=Math.cos(angles[frame*N+i]);sy+=Math.sin(angles[frame*N+i]);}order[frame]=Math.hypot(cx,sy)/N;}
- alignment(0);
+ alignment(0);takeSnapshot(0,0);
  for(let step=0;step<c.steps;step++){
-  const previous=step*N,next=(step+1)*N;
+  const previous=(step%2)*N,next=((step+1)%2)*N;
   for(let i=0;i<N;i++){
    let cx=0,sy=0;
    for(let j=0;j<N;j++){
@@ -69,26 +89,42 @@ function simulate(c,initial=null,noiseTape=null){
    const oldAngle=angles[previous+i];
    xs[2*(next+i)]=((xs[2*(previous+i)]+c.v0*Math.cos(oldAngle)*c.dt)%c.L+c.L)%c.L;
    xs[2*(next+i)+1]=((xs[2*(previous+i)+1]+c.v0*Math.sin(oldAngle)*c.dt)%c.L+c.L)%c.L;
-  }alignment(step+1);
+  }alignment((step+1)%2);
+  if((step+1)%stride===0||step+1===c.steps)takeSnapshot((step+1)%2,step+1);
+  if(step===0||(step+1)%chunkSteps===0||performance.now()-chunkStarted>=16){yield step+1;chunkStarted=performance.now();}
  }
- return {xs,angles,order};
+ return {...saved,sampleSteps,stride};
 }
-function recalculate(){try{
+// Precompute physics in chunks; store sampled playback frames, not every step.
+function simulate(c,initial=null,noiseTape=null){const run=simulationSteps(c,initial,noiseTape);let result;do{result=run.next();}while(!result.done);return result.value;}
+let calculation=0;
+async function recalculate(){const token=++calculation;setPlaying(false);play.disabled=true;try{
  if(inputs.some(el=>el.value.trim()===''||!Number.isFinite(Number(el.value))))throw Error('Enter a finite number in every field.');
  const c={};inputs.forEach((el,i)=>c[keys[i]]=Number(el.value));
  if(!Number.isInteger(c.N)||c.N<1||c.N>500)throw Error('Use an integer particle count from 1 to 500.');
- if(!Number.isInteger(c.steps)||c.steps<1||c.steps>2000)throw Error('Use an integer step count from 1 to 2000.');
- if(c.N*c.N*c.steps>60000000)throw Error('Reduce particle count or steps for a responsive simulation.');
+ if(!Number.isInteger(c.steps)||c.steps<1||c.steps>100000)throw Error('Use an integer step count from 1 to 100000.');
+ if(c.N*c.N*c.steps>1000000000)throw Error('Reduce particle count or steps for a responsive simulation.');
  if(c.L<=0||c.dt<=0||c.v0<0||c.R<0||c.eta<0)throw Error('Box size/time step must be positive; speed, radius and noise must be nonnegative.');
  if(!Number.isInteger(c.seed)||c.seed<0||c.seed>4294967295)throw Error('Use an integer seed between 0 and 4294967295.');
  if(!Number.isFinite(c.steps*c.dt)||!Number.isFinite(c.v0*c.dt)||!Number.isFinite(c.eta*c.dt))throw Error('Parameter magnitudes are too large.');
- const next=simulate(c);data=next;active=c;currentTime=0;lastStamp=null;timeSlider.max=c.steps*c.dt;timeSlider.step=c.dt;
+ document.getElementById('error').textContent='Calculating 0%…';
+ const run=simulationSteps(c);let result;
+ do{result=run.next();if(!result.done){
+  document.getElementById('error').textContent=`Calculating ${Math.round(100*result.value/c.steps)}%…`;
+  await new Promise(resolve=>setTimeout(resolve,0));if(token!==calculation)return;
+ }}while(!result.done);
+ const next=result.value;kdeCache.clear();data=next;active=c;currentTime=0;lastStamp=null;timeSlider.max=c.steps*c.dt;timeSlider.step=c.dt;
  document.getElementById('error').textContent='';draw();
-}catch(e){document.getElementById('error').textContent=e.message;setPlaying(false);}}
+}catch(e){if(token===calculation){document.getElementById('error').textContent=e.message;setPlaying(false);}}finally{if(token===calculation)play.disabled=false;}}
+function playbackIndex(time){
+ const step=time/active.dt,steps=data.sampleSteps;let lo=0,hi=steps.length-1;
+ while(lo<hi){const middle=Math.floor((lo+hi)/2);if(steps[middle]<step)lo=middle+1;else hi=middle;}
+ return lo>0&&step-steps[lo-1]<steps[lo]-step?lo-1:lo;
+}
 function draw(){
  if(!data)return;const w=canvas.clientWidth,h=canvas.clientHeight;
  ctx.fillStyle='#0c1629';ctx.fillRect(0,0,w,h);const size=Math.min(w<680?w-70:w*.65,h-100),left=45,top=60;
- const index=Math.min(active.steps,Math.round(currentTime/active.dt)),offset=index*active.N;
+ const index=playbackIndex(currentTime),offset=index*active.N;
  ctx.strokeStyle='#23384f';ctx.lineWidth=1;
  for(let j=0;j<=5;j++){const d=size*j/5;ctx.beginPath();ctx.moveTo(left+d,top);ctx.lineTo(left+d,top+size);ctx.moveTo(left,top+d);ctx.lineTo(left+size,top+d);ctx.stroke();}
  ctx.strokeStyle='#6ce6ef';ctx.globalAlpha=.35;ctx.strokeRect(left,top,size,size);ctx.globalAlpha=1;
@@ -99,7 +135,7 @@ function draw(){
   const color=`hsl(${angle*180/Math.PI} 80% 70%)`;ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=6;
   ctx.beginPath();ctx.moveTo(arrowSize*.65,0);ctx.lineTo(-arrowSize*.4,arrowSize*.3);ctx.lineTo(-arrowSize*.2,0);ctx.lineTo(-arrowSize*.4,-arrowSize*.3);ctx.closePath();ctx.fill();ctx.restore();
  }
- ctx.font='12px monospace';ctx.fillStyle='#d3e5f8';ctx.fillText(`t  ${currentTime.toFixed(2)}   step ${index} / ${active.steps}`,left,28);
+ ctx.font='12px monospace';ctx.fillStyle='#d3e5f8';ctx.fillText(`t  ${currentTime.toFixed(2)}   step ${data.sampleSteps[index]} / ${active.steps}`,left,28);
  ctx.fillStyle='#879bb5';ctx.font='11px system-ui';ctx.fillText('0',left-15,top+size+17);ctx.fillText(active.L.toFixed(1),left+size-12,top+size+17);ctx.fillText('x',left+size/2,top+size+33);ctx.fillText('y',left-22,top+size/2);
  const align=data.order[index];
  if(w>=680){
@@ -108,19 +144,97 @@ function draw(){
   ctx.fillStyle='#6ce6ef';ctx.font='bold 30px monospace';ctx.fillText(align.toFixed(3),gx,gy+15);
   const chartY=gy+60;ctx.strokeStyle='#28405a';ctx.lineWidth=1;ctx.strokeRect(gx,chartY,gw,gh);
   ctx.beginPath();ctx.strokeStyle='#6ce6ef';ctx.lineWidth=2;
-  for(let j=0;j<=index;j++){const px=gx+j/active.steps*gw,py=chartY+gh*(1-data.order[j]);j?ctx.lineTo(px,py):ctx.moveTo(px,py);}ctx.stroke();
+  for(let j=0;j<=index;j++){const px=gx+data.sampleSteps[j]/active.steps*gw,py=chartY+gh*(1-data.order[j]);j?ctx.lineTo(px,py):ctx.moveTo(px,py);}ctx.stroke();
   ctx.fillStyle='#879bb5';ctx.font='11px system-ui';ctx.fillText('1 = aligned',gx,chartY+gh+22);ctx.fillText('0 = cancelling directions',gx,chartY+gh+40);ctx.fillText('Colors show heading',gx,chartY+gh+76);
  }else{ctx.fillStyle='#6ce6ef';ctx.fillText('Alignment '+align.toFixed(3),left,top+size+51);}
- timeSlider.value=currentTime;document.getElementById('clock').textContent=currentTime.toFixed(2);
+ timeSlider.value=currentTime;document.getElementById('clock').textContent=currentTime.toFixed(2);drawKDE(index);
 }
-function resize(){const ratio=window.devicePixelRatio||1;canvas.width=Math.round(canvas.clientWidth*ratio);canvas.height=Math.round(canvas.clientHeight*ratio);ctx.setTransform(ratio,0,0,ratio,0,0);draw();}
+function resize(){const ratio=window.devicePixelRatio||1;canvas.width=Math.round(canvas.clientWidth*ratio);canvas.height=Math.round(canvas.clientHeight*ratio);ctx.setTransform(ratio,0,0,ratio,0,0);kdeCanvas.width=Math.round(kdeCanvas.clientWidth*ratio);kdeCanvas.height=Math.round(kdeCanvas.clientHeight*ratio);kdeCtx.setTransform(ratio,0,0,ratio,0,0);draw();}
 function setPlaying(value){playing=value;lastStamp=null;play.textContent=value?'Pause':'Play';}
-let debounce;inputs.forEach(el=>el.addEventListener('input',()=>{clearTimeout(debounce);debounce=setTimeout(recalculate,160);}));
+let debounce;inputs.forEach(el=>el.addEventListener('input',()=>{clearTimeout(debounce);calculation++;setPlaying(false);play.disabled=true;debounce=setTimeout(recalculate,160);}));
 timeSlider.addEventListener('input',()=>{setPlaying(false);currentTime=Number(timeSlider.value);draw();});
-play.addEventListener('click',()=>{if(active&&currentTime>=active.steps*active.dt)currentTime=0;setPlaying(!playing);draw();});
+play.addEventListener('click',()=>{if(document.getElementById('error').textContent)return;if(active&&currentTime>=active.steps*active.dt)currentTime=0;setPlaying(!playing);draw();});
 document.getElementById('restart').addEventListener('click',()=>{currentTime=0;lastStamp=null;draw();});
 window.addEventListener('resize',resize);
 function frame(stamp){if(playing&&active){if(lastStamp!==null){const duration=active.steps*active.dt;currentTime=Math.min(duration,currentTime+Math.min((stamp-lastStamp)/1000,.1)*duration/12);if(currentTime>=duration)setPlaying(false);}lastStamp=stamp;draw();}requestAnimationFrame(frame);}
+const kdeCanvas=document.getElementById('kde-scene'),kdeCtx=kdeCanvas.getContext('2d');
+const kdeControls=['kde-width','kde-grid','kde-window','kde-floor'].map(id=>document.getElementById(id));
+const kdeCache=new Map();let kdeSettings={width:.06,grid:24,window:0,floor:.05};
+function kdeAverage(samples,N,L,width,G,floor){
+ const h=width*L,ux=new Float64Array(G*G),uy=new Float64Array(G*G),weights=new Float64Array(G*G);
+ const imageCount=Math.ceil(8*h/L),axisX=new Float64Array(G*N),axisY=new Float64Array(G*N);
+ for(const sample of samples){
+  for(let q=0;q<G;q++)for(let i=0;i<N;i++){
+   let dx=q*L/G-sample.x[2*i],dy=q*L/G-sample.x[2*i+1];
+   dx-=L*Math.round(dx/L);dy-=L*Math.round(dy/L);let wx=0,wy=0;
+   for(let m=-imageCount;m<=imageCount;m++){wx+=Math.exp(-.5*((dx+m*L)/h)**2);wy+=Math.exp(-.5*((dy+m*L)/h)**2);}
+   axisX[q*N+i]=wx;axisY[q*N+i]=wy;
+  }
+  for(let y=0;y<G;y++)for(let x=0;x<G;x++){
+   const k=y*G+x;for(let i=0;i<N;i++){const w=axisX[x*N+i]*axisY[y*N+i];weights[k]+=w;ux[k]+=w*sample.v[2*i];uy[k]+=w*sample.v[2*i+1];}
+  }
+ }
+ const rho=new Float64Array(G*G);let maxSpeed=0;
+ for(let k=0;k<weights.length;k++){
+  rho[k]=weights[k]/(samples.length*2*Math.PI*h*h);
+  if(weights[k]>1e-300&&rho[k]>=floor*N/(L*L)){ux[k]/=weights[k];uy[k]/=weights[k];maxSpeed=Math.max(maxSpeed,Math.hypot(ux[k],uy[k]));}
+  else{ux[k]=NaN;uy[k]=NaN;}
+ }
+ return {ux,uy,rho,maxSpeed:Math.max(1e-12,maxSpeed)};
+}
+function kdeField(index){
+ if(kdeCache.has(index))return kdeCache.get(index);
+ const target=data.sampleSteps[index]*active.dt-kdeSettings.window;let first=index;
+ while(first>0&&data.sampleSteps[first-1]*active.dt>=target)first--;
+ const count=Math.min(7,index-first+1),samples=[];
+ for(let j=0;j<count;j++){
+  const s=count===1?index:Math.floor(first+j*(index-first)/(count-1)),offset=s*active.N*2;
+  const velocity=new Float64Array(active.N*2);
+  for(let i=0;i<active.N;i++){const angle=data.angles[s*active.N+i];velocity[2*i]=active.v0*Math.cos(angle);velocity[2*i+1]=active.v0*Math.sin(angle);}
+  samples.push({x:data.xs.subarray(offset,offset+active.N*2),v:velocity});
+ }
+ const field=kdeAverage(samples,active.N,active.L,kdeSettings.width,kdeSettings.grid,kdeSettings.floor);
+ field.samples=count;kdeCache.set(index,field);if(kdeCache.size>32)kdeCache.delete(kdeCache.keys().next().value);return field;
+}
+function fieldColor(value){
+ const stops=[[12,14,35],[83,22,107],[184,49,96],[246,119,70],[253,242,168]];
+ const p=Math.max(0,Math.min(1,value))*4,i=Math.min(3,Math.floor(p)),f=p-i;
+ return `rgb(${stops[i].map((v,j)=>Math.round(v*(1-f)+stops[i+1][j]*f)).join(',')})`;
+}
+function drawKDE(index){
+ if(!document.getElementById('kde-visible').checked)return;
+ const w=kdeCanvas.clientWidth,h=kdeCanvas.clientHeight,c=kdeCtx;
+ c.fillStyle='#0c1629';c.fillRect(0,0,w,h);if(!data)return;
+ const field=kdeField(index),G=kdeSettings.grid,size=Math.min(w-100,h-100),left=(w-size)/2,top=55,cell=size/G;
+ c.save();c.beginPath();c.rect(left,top,size,size);c.clip();
+ // Center each cell at the same grid point used by the Python KDE; wrap edge cells.
+ for(let y=0;y<=G;y++)for(let x=0;x<=G;x++){
+  const k=(y%G)*G+x%G,speed=Math.hypot(field.ux[k],field.uy[k]);
+  c.fillStyle=Number.isFinite(speed)?fieldColor(speed/field.maxSpeed):'#0c1629';
+  c.fillRect(left+(x-.5)*cell,top+size-(y+.5)*cell,cell+.5,cell+.5);
+ }
+ c.strokeStyle='#d7f8ff';c.lineWidth=1.2;
+ for(let y=0;y<G;y+=2)for(let x=0;x<G;x+=2){
+  const k=y*G+x;if(!Number.isFinite(field.ux[k]))continue;
+  const px=left+x*cell,py=top+size-y*cell,dx=field.ux[k]/field.maxSpeed*cell*1.5,dy=-field.uy[k]/field.maxSpeed*cell*1.5;
+  const tx=px+dx*.5,ty=py+dy*.5,angle=Math.atan2(dy,dx),head=Math.min(4,Math.hypot(dx,dy)*.4);
+  c.beginPath();c.moveTo(px-dx*.5,py-dy*.5);c.lineTo(tx,ty);c.moveTo(tx-head*Math.cos(angle-.5),ty-head*Math.sin(angle-.5));c.lineTo(tx,ty);c.lineTo(tx-head*Math.cos(angle+.5),ty-head*Math.sin(angle+.5));c.stroke();
+ }
+ c.restore();c.strokeStyle='#38536d';c.strokeRect(left,top,size,size);
+ c.fillStyle='#d3e5f8';c.font='12px monospace';c.fillText(`t ${ (data.sampleSteps[index]*active.dt).toFixed(3)}  h ${(kdeSettings.width*active.L).toFixed(3)}  window ${kdeSettings.window}  (${field.samples} samples)`,20,25);
+ c.fillStyle='#879bb5';c.font='11px system-ui';c.fillText('x',left+size/2,top+size+27);c.fillText('y',left-20,top+size/2);
+ c.fillText(`|mean velocity|: 0 – ${field.maxSpeed.toFixed(3)} · arrows/colors scaled per frame`,20,h-12);
+}
+function updateKDESettings(){
+ const values=kdeControls.map(el=>Number(el.value));
+ if(kdeControls.some(el=>el.value.trim()==='')||!values.every(Number.isFinite)||values[0]<.01||values[0]>.5||!Number.isInteger(values[1])||values[1]<12||values[1]>48||values[2]<0||values[3]<0||values[3]>1){
+  document.getElementById('kde-error').textContent='Use h/L 0.01–0.5, integer grid 12–48, window ≥ 0 and density floor 0–1.';return;
+ }
+ kdeSettings={width:values[0],grid:values[1],window:values[2],floor:values[3]};kdeCache.clear();document.getElementById('kde-error').textContent='';draw();
+}
+kdeControls.forEach(el=>el.addEventListener('input',updateKDESettings));
+document.getElementById('kde-visible').addEventListener('change',()=>{kdeCanvas.style.display=document.getElementById('kde-visible').checked?'block':'none';resize();});
+
 recalculate();resize();requestAnimationFrame(frame);
 
 </script></body></html>'''

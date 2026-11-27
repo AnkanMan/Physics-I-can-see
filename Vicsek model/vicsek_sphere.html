@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vicsek inside a sphere — live controls</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#080e1c;color:#edf5ff}*{box-sizing:border-box}
+body{margin:0;padding:24px}main{max-width:1080px;margin:auto}.eyebrow{font-size:12px;letter-spacing:2px;color:#6ce6ef;font-weight:700}
+h1{font-size:clamp(24px,4vw,36px);margin:10px 0 20px}.panel{background:#0c1629;border:1px solid #23384f;border-radius:18px;overflow:hidden}
+canvas{display:block;width:100%;height:510px;touch-action:none;cursor:grab}canvas:active{cursor:grabbing}
+.controls{padding:22px;border-top:1px solid #23384f}.parameters{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px}
+fieldset{margin:0;padding:12px;border:1px solid #28405a;border-radius:10px;min-width:0}legend{padding:0 5px;font-size:13px;font-weight:600}
+.components{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}label{display:block;color:#879bb5;font-size:12px}
+input[type=number]{width:100%;margin-top:6px;padding:9px 6px;background:#080e1c;border:1px solid #28405a;border-radius:6px;color:#edf5ff;font:14px monospace}
+input:focus-visible,button:focus-visible{outline:2px solid #ff85c8;outline-offset:3px}
+.transport{display:flex;align-items:center;gap:12px}button{border:1px solid #38536d;border-radius:8px;padding:10px 16px;background:#14273e;color:#edf5ff;cursor:pointer;white-space:nowrap}button:hover{border-color:#6ce6ef}
+#play{background:#6ce6ef;color:#080e1c;font-weight:700;min-width:82px}.timeline{flex:1}input[type=range]{width:100%;accent-color:#6ce6ef;cursor:pointer}#clock{color:#b7c9df;font:13px monospace;min-width:65px}
+.note{color:#879bb5;font-size:12px;line-height:1.6;margin-top:16px}#error{color:#ffb3bd;font-size:13px;margin-bottom:12px}#error:empty{display:none}
+@media(max-width:760px){body{padding:12px}.parameters{grid-template-columns:1fr 1fr}.controls{padding:15px}.transport{flex-wrap:wrap}.timeline{flex-basis:100%;order:5}canvas{height:400px}}
+@media(max-width:410px){.parameters{grid-template-columns:1fr}}
+</style></head>
+<body><main><div class="eyebrow">VICSEK / SPHERICAL CONFINEMENT</div><h1>A flock inside a sphere.</h1>
+<div class="panel"><canvas id="scene" role="img" aria-label="Vicsek particles in a spherical container; drag to rotate, scroll to zoom"></canvas>
+<div class="controls"><div class="parameters"><fieldset><legend>Particles and sphere</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="n">Count N<input id="n" type="number" step="1"></label><label for="box">Sphere radius a<input id="box" type="number" step="1"></label></div></fieldset><fieldset><legend>Motion and neighbors</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="speed">Preferred v₀<input id="speed" type="number" step="0.05"></label><label for="radius">Radius R<input id="radius" type="number" step="0.1"></label></div></fieldset><fieldset><legend>Random turning</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="noise">Noise rate η<input id="noise" type="number" step="0.1"></label><label for="dt">Time step Δt<input id="dt" type="number" step="0.1"></label></div></fieldset><fieldset><legend>Duration and seed</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="steps">Steps<input id="steps" type="number" step="10"></label><label for="seed">Random seed<input id="seed" type="number" step="1"></label></div></fieldset><fieldset><legend>Radial wall response</legend><div class="components" style="grid-template-columns:1fr 1fr"><label for="wall-width">Layer width<input id="wall-width" type="number" step="0.1"></label><label for="wall-strength">Damping rate<input id="wall-strength" type="number" step="0.5"></label></div></fieldset></div><div id="error" role="status"></div>
+<div class="transport"><button id="play" type="button">Play</button><button id="restart" type="button">Restart</button>
+<button id="resetview" type="button">Reset view</button><div class="timeline"><label for="time">Time</label><input id="time" type="range" min="0" step="0.01" value="0"></div><span id="clock">0.00</span></div>
+<div class="note">Edit any value to recalculate and restart. Long runs are precomputed with progress and cancellation on input changes. Up to 100,000 steps and one billion N²-step operations; about 2,001 frames are retained. Playback sampling does not change the physics time step. Drag to rotate; scroll to zoom. Arrows show actual velocity; color shows φ.<br>Uniform cone noise; positions use current actual velocity. The nearby wall layer damps only outward radial motion. At contact v·n = 0: tangential velocity is preserved without speed renormalization or a fallback direction. Actual speed can be below v₀; purely radial motion stops at contact.<br>Wall contact is resolved at time steps; the strict tangency rule keeps contacted particles on the surface. Controls recalculate this page only; notebook and MP4 stay unchanged.</div>
+</div></div></main>
+<script>
+'use strict';
+const config={"N": 150, "a": 5.0, "wallWidth": 1.0, "wallStrength": 5.0, "v0": 0.3, "R": 1.5, "eta": 0.6, "dt": 0.05, "steps": 800, "seed": 42};
+const canvas=document.getElementById('scene'),ctx=canvas.getContext('2d');
+const ids=['n','box','speed','radius','noise','dt','steps','seed','wall-width','wall-strength'];
+const keys=['N','a','v0','R','eta','dt','steps','seed','wallWidth','wallStrength'];
+const inputs=ids.map(id=>document.getElementById(id));inputs.forEach((el,i)=>el.value=config[keys[i]]);
+const timeSlider=document.getElementById('time'),play=document.getElementById('play');
+let active=null,data=null,currentTime=0,playing=false,lastStamp=null;
+let yaw=-.8,pitch=.42,zoom=1,drag=null;
+function randomGenerator(seed){let state=seed>>>0;return ()=>{state=(state+0x6D2B79F5)>>>0;let z=state;z=Math.imul(z^(z>>>15),z|1);z^=z+Math.imul(z^(z>>>7),z|61);return ((z^(z>>>14))>>>0)/4294967296;};}
+const norm3=a=>Math.hypot(...a);
+const cross3=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+function directionFromAngles(theta,phi){return [Math.cos(theta)*Math.sin(phi),Math.cos(theta)*Math.cos(phi),Math.sin(theta)];}
+function wallResponse(position,velocity,c){
+ const radius=norm3(position);if(radius===0)return velocity.slice();
+ const n=position.map(v=>v/radius),ramp=Math.max(0,Math.min(1,(radius-c.a+c.wallWidth)/c.wallWidth));
+ const radial=velocity.reduce((sum,v,k)=>sum+v*n[k],0);
+ const removed=-Math.expm1(-c.wallStrength*ramp*c.dt)*Math.max(0,radial);
+ const result=velocity.map((v,k)=>v-removed*n[k]);
+ if(radius>=c.a*(1-1e-12)){const remaining=result.reduce((sum,v,k)=>sum+v*n[k],0);return result.map((v,k)=>v-remaining*n[k]);}
+ return result;
+}
+function* simulationSteps(c,initial=null,noiseTape=null){
+ const rng=randomGenerator(c.seed),N=c.N,frames=2;
+ const stride=Math.max(1,Math.ceil(c.steps/2000)),savedFrames=Math.ceil(c.steps/stride)+1;
+ const sampleSteps=new Uint32Array(savedFrames);let savedIndex=0,chunkStarted=performance.now();
+ const chunkSteps=Math.max(1,Math.min(250,Math.floor(500000/(N*N))));
+ const saved={xs:new Float64Array(savedFrames*N*3),vs:new Float64Array(savedFrames*N*3),directions:new Float64Array(savedFrames*N*3),thetas:new Float64Array(savedFrames*N*1),phis:new Float64Array(savedFrames*N*1),order:new Float64Array(savedFrames)};
+ function takeSnapshot(frame,step){
+  sampleSteps[savedIndex]=step;
+  saved.xs.set(xs.subarray(frame*N*3,(frame+1)*N*3),savedIndex*N*3);
+  saved.vs.set(vs.subarray(frame*N*3,(frame+1)*N*3),savedIndex*N*3);
+  saved.directions.set(directions.subarray(frame*N*3,(frame+1)*N*3),savedIndex*N*3);
+  saved.thetas.set(thetas.subarray(frame*N*1,(frame+1)*N*1),savedIndex*N*1);
+  saved.phis.set(phis.subarray(frame*N*1,(frame+1)*N*1),savedIndex*N*1);
+  saved.order[savedIndex]=order[frame];
+  savedIndex++;
+ }
+
+ const xs=new Float64Array(frames*N*3),directions=new Float64Array(frames*N*3),order=new Float64Array(frames),vs=new Float64Array(frames*N*3);
+ const thetas=new Float64Array(frames*N),phis=new Float64Array(frames*N);
+ for(let i=0;i<N;i++){
+  if(initial){for(let j=0;j<3;j++)xs[3*i+j]=initial.x[i][j];}
+  else{const z=2*rng()-1,p=2*Math.PI*rng(),r=c.a*Math.cbrt(rng()),q=Math.sqrt(1-z*z);xs[3*i]=r*q*Math.cos(p);xs[3*i+1]=r*q*Math.sin(p);xs[3*i+2]=r*z;}
+ }
+ for(let i=0;i<N;i++)thetas[i]=initial?initial.theta[i]:Math.asin(2*rng()-1);
+ for(let i=0;i<N;i++)phis[i]=initial?initial.phi[i]:rng()*2*Math.PI;
+ function storeVelocity(frame,i,candidate,fallbackTheta,fallbackPhi){
+  const k=3*(frame*N+i),p=Array.from(xs.subarray(k,k+3)),velocity=wallResponse(p,candidate,c);
+  const speed=norm3(velocity),horizontal=Math.hypot(velocity[0],velocity[1]);
+  thetas[frame*N+i]=speed>1e-12?Math.atan2(velocity[2],horizontal):fallbackTheta;
+  const angle=horizontal>1e-12?Math.atan2(velocity[0],velocity[1]):fallbackPhi;
+  phis[frame*N+i]=((angle%(2*Math.PI))+2*Math.PI)%(2*Math.PI);
+  for(let j=0;j<3;j++){vs[k+j]=velocity[j];directions[k+j]=c.v0>0?velocity[j]/c.v0:0;}
+ }
+ for(let i=0;i<N;i++)storeVelocity(0,i,directionFromAngles(thetas[i],phis[i]).map(v=>v*c.v0),thetas[i],phis[i]);
+ function alignment(frame){let x=0,y=0,z=0;for(let i=0;i<N;i++){const k=3*(frame*N+i);const d=directionFromAngles(thetas[frame*N+i],phis[frame*N+i]);x+=d[0];y+=d[1];z+=d[2];}order[frame]=Math.hypot(x,y,z)/N;}
+ alignment(0);takeSnapshot(0,0);const cosCap=Math.cos(Math.min(Math.PI,c.eta*c.dt/2));
+ for(let step=0;step<c.steps;step++){
+  const previous=(step%2)*N,next=((step+1)%2)*N;
+  const cosDraws=new Float64Array(N),psiDraws=new Float64Array(N);
+  // A supplied tape contains two independent uniform [0,1] draws per particle.
+  for(let i=0;i<N;i++)cosDraws[i]=noiseTape?noiseTape[step*2*N+i]:rng();
+  for(let i=0;i<N;i++)psiDraws[i]=noiseTape?noiseTape[step*2*N+N+i]:rng();
+  for(let i=0;i<N;i++){
+   const mean=[0,0,0];
+   for(let j=0;j<N;j++){
+    let distance=0;for(let k=0;k<3;k++){const d=xs[3*(previous+i)+k]-xs[3*(previous+j)+k];distance+=d*d;}
+    if(distance<=c.R*c.R){const d=directionFromAngles(thetas[previous+j],phis[previous+j]);for(let k=0;k<3;k++)mean[k]+=d[k];}
+   }
+   const length=norm3(mean),average=length>1e-12?mean.map(v=>v/length):directionFromAngles(thetas[previous+i],phis[previous+i]);
+   const reference=Math.abs(average[2])>.9?[1,0,0]:[0,0,1];
+   let e1=cross3(reference,average);const tangentLength=norm3(e1);e1=e1.map(v=>v/tangentLength);const e2=cross3(average,e1);
+   const cb=cosCap+(1-cosCap)*cosDraws[i],sb=Math.sqrt(Math.max(0,1-cb*cb)),psi=2*Math.PI*psiDraws[i];
+   let rotated=average.map((v,k)=>cb*v+sb*Math.cos(psi)*e1[k]+sb*Math.sin(psi)*e2[k]);
+   const rn=norm3(rotated);rotated=rotated.map(v=>v/rn);
+   const horizontal=Math.hypot(rotated[0],rotated[1]);
+   thetas[next+i]=Math.atan2(rotated[2],horizontal);
+   const newPhi=horizontal>1e-12?Math.atan2(rotated[0],rotated[1]):phis[previous+i];
+   phis[next+i]=((newPhi%(2*Math.PI))+2*Math.PI)%(2*Math.PI);
+   const d=directionFromAngles(thetas[next+i],phis[next+i]);
+   const p=Array.from(xs.subarray(3*(previous+i),3*(previous+i)+3)).map((v,k)=>v+c.dt*vs[3*(previous+i)+k]);
+   const radius=norm3(p),factor=Math.max(1,radius/c.a);
+   for(let k=0;k<3;k++)xs[3*(next+i)+k]=p[k]/factor;
+   storeVelocity((step+1)%2,i,d.map(v=>v*c.v0),thetas[next+i],phis[next+i]);
+  }alignment((step+1)%2);
+  if((step+1)%stride===0||step+1===c.steps)takeSnapshot((step+1)%2,step+1);
+  if(step===0||(step+1)%chunkSteps===0||performance.now()-chunkStarted>=16){yield step+1;chunkStarted=performance.now();}
+ }
+ return {...saved,sampleSteps,stride};
+}
+// Precompute physics in chunks; store sampled playback frames, not every step.
+function simulate(c,initial=null,noiseTape=null){const run=simulationSteps(c,initial,noiseTape);let result;do{result=run.next();}while(!result.done);return result.value;}
+let calculation=0;
+async function recalculate(){const token=++calculation;setPlaying(false);play.disabled=true;try{
+ if(inputs.some(el=>el.value.trim()===''||!Number.isFinite(Number(el.value))))throw Error('Enter a finite number in every field.');
+ const c={};inputs.forEach((el,i)=>c[keys[i]]=Number(el.value));
+ if(!Number.isInteger(c.N)||c.N<1||c.N>500)throw Error('Use an integer particle count from 1 to 500.');
+ if(!Number.isInteger(c.steps)||c.steps<1||c.steps>100000)throw Error('Use an integer step count from 1 to 100000.');
+ if(c.N*c.N*c.steps>1000000000)throw Error('Reduce particle count or steps for a responsive simulation.');
+ if(c.a<=0||c.dt<=0||c.v0<0||c.R<0||c.eta<0||c.wallWidth<=0||c.wallWidth>c.a||c.wallStrength<0)throw Error('Sphere radius/time step must be positive; layer width must be in (0, a]; speed, neighbor radius, noise and damping must be nonnegative.');
+ if(!Number.isInteger(c.seed)||c.seed<0||c.seed>4294967295)throw Error('Use an integer seed between 0 and 4294967295.');
+ if(!Number.isFinite(c.steps*c.dt)||!Number.isFinite(c.v0*c.dt)||!Number.isFinite(c.eta*c.dt)||!Number.isFinite(c.wallStrength*c.dt))throw Error('Parameter magnitudes are too large.');
+ document.getElementById('error').textContent='Calculating 0%…';
+ const run=simulationSteps(c);let result;
+ do{result=run.next();if(!result.done){
+  document.getElementById('error').textContent=`Calculating ${Math.round(100*result.value/c.steps)}%…`;
+  await new Promise(resolve=>setTimeout(resolve,0));if(token!==calculation)return;
+ }}while(!result.done);
+ const next=result.value;data=next;active=c;currentTime=0;lastStamp=null;timeSlider.max=c.steps*c.dt;timeSlider.step=c.dt;
+ document.getElementById('error').textContent='';draw();
+}catch(e){if(token===calculation){document.getElementById('error').textContent=e.message;setPlaying(false);}}finally{if(token===calculation)play.disabled=false;}}
+function project(p){
+ const x=p[0]/(2*active.a),y=p[1]/(2*active.a),z=p[2]/(2*active.a);
+ const xx=Math.cos(yaw)*x-Math.sin(yaw)*y,yy=Math.sin(yaw)*x+Math.cos(yaw)*y;
+ const scale=Math.min(canvas.clientWidth*(canvas.clientWidth<680?.8:.55),canvas.clientHeight*.55)*zoom;
+ return [canvas.clientWidth*(canvas.clientWidth<680?.5:.36)+xx*scale,canvas.clientHeight*.5-(Math.cos(pitch)*z-Math.sin(pitch)*yy)*scale];
+}
+function playbackIndex(time){
+ const step=time/active.dt,steps=data.sampleSteps;let lo=0,hi=steps.length-1;
+ while(lo<hi){const middle=Math.floor((lo+hi)/2);if(steps[middle]<step)lo=middle+1;else hi=middle;}
+ return lo>0&&step-steps[lo-1]<steps[lo]-step?lo-1:lo;
+}
+function draw(){
+ if(!data)return;const w=canvas.clientWidth,h=canvas.clientHeight;ctx.fillStyle='#0c1629';ctx.fillRect(0,0,w,h);
+ const index=playbackIndex(currentTime),offset=index*active.N;
+ ctx.lineWidth=1;ctx.strokeStyle='#6ce6ef';ctx.globalAlpha=.25;
+ function traceSphere(latitude){ctx.beginPath();for(let k=0;k<=72;k++){const angle=k*2*Math.PI/72,p=latitude===null?[active.a*Math.cos(angle),0,active.a*Math.sin(angle)]:[active.a*Math.cos(latitude)*Math.cos(angle),active.a*Math.cos(latitude)*Math.sin(angle),active.a*Math.sin(latitude)];const q=project(p);k?ctx.lineTo(...q):ctx.moveTo(...q);}ctx.stroke();}
+ for(let j=-3;j<=3;j++)traceSphere(j*Math.PI/8);
+ for(let j=0;j<8;j++){ctx.beginPath();for(let k=0;k<=72;k++){const angle=k*2*Math.PI/72,az=j*Math.PI/8,q=project([active.a*Math.cos(angle)*Math.cos(az),active.a*Math.cos(angle)*Math.sin(az),active.a*Math.sin(angle)]);k?ctx.lineTo(...q):ctx.moveTo(...q);}ctx.stroke();}
+ ctx.globalAlpha=1;ctx.font='12px system-ui';ctx.fillStyle='#b7c9df';
+ for(let j=0;j<3;j++){const p=[0,0,0];p[j]=active.a;const q=project(p);ctx.fillText(['x','y','z'][j],q[0]+7,q[1]+5);}
+ for(let i=0;i<active.N;i++){
+  const k=3*(offset+i),p=Array.from(data.xs.slice(k,k+3)),d=Array.from(data.directions.slice(k,k+3));
+  if(norm3(d)<1e-12){const dot=project(p);ctx.fillStyle='#b7c9df';ctx.fillRect(dot[0]-1,dot[1]-1,2,2);continue;}
+  const tail=project(p.map((v,j)=>v-.024*active.a*d[j])),tip=project(p.map((v,j)=>v+.046*active.a*d[j]));
+  const head=Math.min(4,Math.hypot(tip[0]-tail[0],tip[1]-tail[1])*.4);
+  const angle=Math.atan2(tip[1]-tail[1],tip[0]-tail[0]),color=`hsl(${(data.phis[offset+i]*180/Math.PI+360)%360} 80% 70%)`;
+  ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=1.7;ctx.shadowColor=color;ctx.shadowBlur=4;
+  ctx.beginPath();ctx.moveTo(...tail);ctx.lineTo(...tip);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(...tip);ctx.lineTo(tip[0]-head*Math.cos(angle-.5),tip[1]-head*Math.sin(angle-.5));ctx.lineTo(tip[0]-head*Math.cos(angle+.5),tip[1]-head*Math.sin(angle+.5));ctx.closePath();ctx.fill();ctx.shadowBlur=0;
+ }
+ ctx.font='12px monospace';ctx.fillStyle='#d3e5f8';ctx.fillText(`t  ${currentTime.toFixed(2)}   step ${data.sampleSteps[index]} / ${active.steps}`,20,28);
+ const align=data.order[index];
+ if(w>=680){
+  const gx=w*.77,gy=100,gw=w*.18,gh=135;ctx.fillStyle='#b7c9df';ctx.font='12px system-ui';ctx.fillText('HEADING ALIGNMENT',gx,gy-25);
+  ctx.fillStyle='#6ce6ef';ctx.font='bold 30px monospace';ctx.fillText(align.toFixed(3),gx,gy+15);
+  const chartY=gy+60;ctx.strokeStyle='#28405a';ctx.lineWidth=1;ctx.strokeRect(gx,chartY,gw,gh);ctx.beginPath();ctx.strokeStyle='#6ce6ef';ctx.lineWidth=2;
+  for(let j=0;j<=index;j++){const px=gx+data.sampleSteps[j]/active.steps*gw,py=chartY+gh*(1-data.order[j]);j?ctx.lineTo(px,py):ctx.moveTo(px,py);}ctx.stroke();
+  ctx.fillStyle='#879bb5';ctx.font='11px system-ui';ctx.fillText('1 = aligned',gx,chartY+gh+22);ctx.fillText('0 = cancelling directions',gx,chartY+gh+40);ctx.fillText('Arrow length: actual speed',gx,chartY+gh+76);
+ }else{ctx.fillStyle='#6ce6ef';ctx.fillText('Alignment '+align.toFixed(3),20,h-20);}
+ timeSlider.value=currentTime;document.getElementById('clock').textContent=currentTime.toFixed(2);
+}
+function resize(){const ratio=window.devicePixelRatio||1;canvas.width=Math.round(canvas.clientWidth*ratio);canvas.height=Math.round(canvas.clientHeight*ratio);ctx.setTransform(ratio,0,0,ratio,0,0);draw();}
+function setPlaying(value){playing=value;lastStamp=null;play.textContent=value?'Pause':'Play';}
+let debounce;inputs.forEach(el=>el.addEventListener('input',()=>{clearTimeout(debounce);calculation++;setPlaying(false);play.disabled=true;debounce=setTimeout(recalculate,160);}));
+timeSlider.addEventListener('input',()=>{setPlaying(false);currentTime=Number(timeSlider.value);draw();});
+play.addEventListener('click',()=>{if(document.getElementById('error').textContent)return;if(active&&currentTime>=active.steps*active.dt)currentTime=0;setPlaying(!playing);draw();});
+document.getElementById('restart').addEventListener('click',()=>{currentTime=0;lastStamp=null;draw();});
+document.getElementById('resetview').addEventListener('click',()=>{yaw=-.8;pitch=.42;zoom=1;draw();});
+canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);});
+canvas.addEventListener('pointermove',e=>{if(!drag)return;yaw+=(e.clientX-drag.x)*.008;pitch=Math.max(-1.45,Math.min(1.45,pitch+(e.clientY-drag.y)*.008));drag={x:e.clientX,y:e.clientY};draw();});
+canvas.addEventListener('pointerup',()=>drag=null);canvas.addEventListener('pointercancel',()=>drag=null);
+canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.3,Math.min(3,zoom*Math.exp(-e.deltaY*.001)));draw();},{passive:false});
+window.addEventListener('resize',resize);
+function frame(stamp){if(playing&&active){if(lastStamp!==null){const duration=active.steps*active.dt;currentTime=Math.min(duration,currentTime+Math.min((stamp-lastStamp)/1000,.1)*duration/12);if(currentTime>=duration)setPlaying(false);}lastStamp=stamp;draw();}requestAnimationFrame(frame);}
+recalculate();resize();requestAnimationFrame(frame);
+
+</script></body></html>
