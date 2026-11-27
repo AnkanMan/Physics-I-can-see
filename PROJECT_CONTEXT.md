@@ -20,6 +20,7 @@ The project teaches particle dynamics through Python notebooks, animated plots, 
 | Uniform Lorentz force | `Lorentz Force/Lorentz_force.ipynb` | `Lorentz Force/lorentz_force_player.py` | `lorentz_force.html`, `lorentz_force.mp4` |
 | Tokamak test particle | `Lorentz Force/tokamak.ipynb` | `Lorentz Force/tokamak_player.py` | `tokamak.html`, `tokamak.mp4` |
 | Vicsek flocking | `Vicsek model/Viscek.ipynb` | `Vicsek model/vicsek_player.py` | `vicsek.html`, `vicsek.mp4` |
+| Vicsek flocking in 3D | Same notebook, appended 3D section | `Vicsek model/vicsek_3d_player.py` | `vicsek_3d.html`, `vicsek_3d.mp4` |
 
 The helper `.py` files contain the HTML/CSS/JavaScript templates and configuration builders. They are required to regenerate the interactive HTML. Edit these helpers rather than making lasting changes only to the generated `.html` files.
 
@@ -43,6 +44,7 @@ make_ball_player(x, v, t, epsilon, dt)
 make_lorentz_player(x, v, t, E, B, q, m)
 make_tokamak_player(R_0, a, B_0, q_s, Q, m, E_params, x, v, t)
 make_vicsek_player(N, L, v_0, R, eta, dt, n_steps, seed)
+make_vicsek_3d_player(N_3d, L_3d, v_0_3d, R_3d, eta_3d, dt_3d, n_steps_3d, seed_3d)
 ```
 
 Here `x` and `v` contain Cartesian vectors, usually with shape `(N, 3)`, and `t` contains their sample times.
@@ -57,7 +59,7 @@ These are distinct outputs:
 
 Editing browser inputs recalculates only that browser session. It does not write back into the notebook, helper, HTML file, or MP4. Reloading restores the configuration embedded at export time. To make different defaults permanent, change the notebook initialization and regenerate the exports.
 
-The four standalone players share a dark visual style, glowing particle/trails, play/pause/restart, and a time scrubber. Lorentz and tokamak players also support drag-to-rotate, scroll-to-zoom, and camera reset. Their templates are currently separate; keep shared behavior consistent when editing them.
+The five standalone players share a dark visual style, glowing particle/trails, play/pause/restart, and a time scrubber. Lorentz and tokamak players also support drag-to-rotate, scroll-to-zoom, and camera reset. Their templates are currently separate; keep shared behavior consistent when editing them.
 
 ## Bouncing-ball model
 
@@ -141,6 +143,24 @@ Keep the existing filename `Vicsek model/Viscek.ipynb` (including its spelling).
 The visualization uses colored heading arrows and plots heading alignment `abs(mean(exp(1j*theta)))`, between zero and one. The last two notebook cells create inline Matplotlib playback and export `vicsek.html` and `vicsek.mp4` beside the notebook. Existing physics/initialization cells were preserved when adding these exports.
 
 The standalone HTML has live controls for `N`, `L`, `v_0`, `R`, `eta`, `dt`, step count and random seed. The browser uses its own deterministic seeded generator; NumPy uses `default_rng`. A seed reproduces a run within each implementation, but identical numerical seeds do not imply identical Python/browser realizations. Compare the update rules with matching supplied initial states and random rates when testing parity. The browser limits work to keep parameter changes responsive.
+
+### Appended 3-D Vicsek section
+
+The same notebook has a separate 3-D section with `_3d` state/animation names. Preserve the user's two-angle velocity convention:
+
+```text
+v = v_0 * (cos(theta)*sin(phi), cos(theta)*cos(phi), sin(theta))
+```
+
+Theta is elevation; phi runs from +y toward +x. Do not swap the x/y sine and cosine. `vicsek_model_3d(...)` returns `x, v, theta, phi, t`: vector histories have shape `(n_steps+1, N, 3)`, and angle histories `(n_steps+1, N)`. `direction_3d` is derived from the angles for rendering/diagnostics.
+
+**Current noise rule:** align neighbors' unit direction vectors, then sample uniformly in solid angle inside a cone about the mean. Its half-angle is `alpha = min(pi, eta * dt / 2)`. `add_direction_noise_3d(...)` samples `cos(beta)` uniformly in `[cos(alpha), 1]` and tangent-plane azimuth uniformly in `[0, 2*pi)`, constructing the new direction in an orthonormal local basis. Recover theta with `atan2(uz, hypot(ux, uy))` and phi with `atan2(ux, uy)` modulo 2*pi. At a vertical heading retain old phi; if neighboring directions cancel, use the old heading as cone axis. Zero noise gives alignment, and a cone reaching pi samples the full sphere.
+
+The user first requested independent theta/phi noise, then explicitly requested this cone-based correction after discussing coordinate bias. Keep both angle histories and the exact velocity formula, but do not restore independent angle increments. Initial headings remain uniform on the sphere. Positions still advance with the **current** velocity, and neighbors/positions are periodic in a cube.
+
+The notebook and standalone HTML implement this same cone rule. Matching random tapes for tests now contain two uniform `[0,1]` draws per particle (cosine and tangent azimuth), not angular-rate increments. The browser uses its own seeded generator, so parity tests supply shared initial theta/phi and random draws.
+
+The separate exports are `vicsek_3d.html` and `vicsek_3d.mp4`; 2-D exports stay intact. The HTML has live model controls and drag/zoom/reset camera. Colors encode phi, while arrows show full 3-D direction. Rendered labels should describe uniform cone noise and theta/phi state.
 
 ## Verification expectations
 
