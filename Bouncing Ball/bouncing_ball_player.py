@@ -1,0 +1,152 @@
+"""Build a standalone bouncing-ball player with live physics controls."""
+import json
+
+
+def make_ball_player(x, v, t, epsilon, dt):
+    config = {
+        "position": x[0].tolist(), "velocity": v[0].tolist(),
+        "epsilon": float(epsilon), "dt": float(dt),
+        "duration": float(t[-1] - t[0]), "count": len(t),
+    }
+    return _HTML.replace("__BALL_CONFIG__", json.dumps(config))
+
+
+_HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bouncing ball — live controls</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#080e1c;color:#edf5ff}
+*{box-sizing:border-box}body{margin:0;padding:24px}main{max-width:960px;margin:auto}
+.eyebrow{color:#6ce6ef;font-size:12px;letter-spacing:2px;font-weight:700}
+h1{font-size:clamp(25px,4vw,38px);margin:10px 0 22px}
+.panel{background:#0c1629;border:1px solid #23384f;border-radius:18px;overflow:hidden}
+canvas{display:block;width:100%;height:480px} .controls{padding:22px;border-top:1px solid #23384f}
+.parameters{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-bottom:24px}
+label{display:block;color:#b7c9df;font-size:14px}output{float:right;color:#6ce6ef;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:#6ce6ef;margin:14px 0 0;cursor:pointer}
+.transport{display:flex;align-items:center;gap:12px}button{border:1px solid #38536d;border-radius:9px;padding:10px 18px;background:#14273e;color:#edf5ff;cursor:pointer}
+button:hover{border-color:#6ce6ef}button:focus-visible,input:focus-visible{outline:2px solid #ff85c8;outline-offset:4px}
+#play{background:#6ce6ef;color:#080e1c;border-color:#6ce6ef;min-width:86px;font-weight:700}
+.timeline{flex:1}#clock{min-width:72px;color:#b7c9df;font:13px monospace;text-align:right}
+.note{color:#879bb5;font-size:12px;line-height:1.6;margin-top:16px}
+@media(max-width:600px){body{padding:12px}.parameters{grid-template-columns:1fr;gap:16px}canvas{height:390px}.controls{padding:16px}.transport{flex-wrap:wrap}.timeline{flex-basis:100%;order:4}}
+</style>
+</head>
+<body><main>
+<div class="eyebrow">GRAVITY / IN MOTION</div>
+<h1>A ball. A floor. Your parameters.</h1>
+<div class="panel">
+<canvas id="scene" role="img" aria-label="Animated ball trajectory in the x-z plane"></canvas>
+<div class="controls">
+<div class="parameters">
+<div><label for="vx">Initial horizontal velocity vₓ <output id="vxvalue" for="vx"></output></label>
+<input id="vx" type="range" min="-10" max="10" step="0.1"></div>
+<div><label for="v0">Initial vertical velocity v₀ <output id="v0value" for="v0"></output></label>
+<input id="v0" type="range" min="-10" max="10" step="0.1"></div>
+<div><label for="epsilon">Restitution ε <output id="epsilonvalue" for="epsilon"></output></label>
+<input id="epsilon" type="range" min="0" max="1" step="0.01"></div>
+</div>
+<div class="transport">
+<button id="play" type="button" aria-label="Play animation">Play</button>
+<button id="restart" type="button">Restart</button>
+<div class="timeline"><label for="time">Time</label><input id="time" type="range" min="0" step="0.001" value="0"></div>
+<span id="clock">0.00 s</span>
+</div>
+<div class="note">Positive v₀ is upward. ε = 0 gives no rebound; ε = 1 gives elastic impacts.<br>
+Changing a parameter restarts the simulation. The starting height comes from the notebook. Positive vₓ moves right.</div>
+</div></div>
+</main>
+<script>
+'use strict';
+const config = __BALL_CONFIG__;
+const canvas=document.getElementById('scene'),ctx=canvas.getContext('2d');
+const v0=document.getElementById('v0'),eps=document.getElementById('epsilon');
+const vxControl=document.getElementById('vx');
+vxControl.min=Math.min(-10,Math.floor(config.velocity[0]));
+vxControl.max=Math.max(10,Math.ceil(config.velocity[0]));
+vxControl.value=config.velocity[0];
+const timeSlider=document.getElementById('time'),play=document.getElementById('play');
+v0.min=Math.min(-10,Math.floor(config.velocity[2]));
+v0.max=Math.max(10,Math.ceil(config.velocity[2]));
+v0.value=config.velocity[2];eps.value=config.epsilon;timeSlider.max=config.duration;
+let samples=[],currentTime=0,playing=false,lastStamp=null,view={};
+
+function simulate(initialVz,restitution,initialVx=config.velocity[0]){
+  // Same backward-Euler update and floor impulse as Newton_laws.ipynb.
+  const data=[{x:config.position[0],z:config.position[2],vx:initialVx,vz:initialVz}];
+  for(let i=1;i<config.count;i++){
+    const p=data[i-1];let vz=p.vz-9.81*config.dt;
+    let xx=p.x+config.dt*p.vx,zz=p.z+config.dt*vz;
+    let vx=p.vx;
+    if(zz<=0){zz=0;vz=-restitution*Math.min(vz,0);}
+    if(p.z===0&&p.vz===0){xx=p.x+config.dt*p.vx;zz=p.z;vx=p.vx;vz=p.vz;}
+    data.push({x:xx,z:zz,vx:vx,vz:vz});
+  }
+  return data;
+}
+function recalculate(){
+  samples=simulate(Number(v0.value),Number(eps.value),Number(vxControl.value));
+  let maxZ=0.5,minX=samples[0].x,maxX=minX;
+  for(const p of samples){maxZ=Math.max(maxZ,p.z);minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);}
+  view={maxZ:maxZ*1.2,minX:minX,maxX:maxX};currentTime=0;lastStamp=null;
+  document.getElementById('vxvalue').textContent=Number(vxControl.value).toFixed(1)+' m/s';
+  document.getElementById('v0value').textContent=Number(v0.value).toFixed(1)+' m/s';
+  document.getElementById('epsilonvalue').textContent=Number(eps.value).toFixed(2);
+  draw();
+}
+function draw(){
+  const w=canvas.clientWidth,h=canvas.clientHeight;
+  ctx.clearRect(0,0,w,h);ctx.fillStyle='#0c1629';ctx.fillRect(0,0,w,h);
+  const left=62,right=w-28,top=34,bottom=h-58;
+  const spanX=Math.max(view.maxX-view.minX+0.5,view.maxZ*0.8);
+  const scale=Math.min((right-left)/spanX,(bottom-top)/view.maxZ);
+  const centerX=(view.minX+view.maxX)/2;
+  const px=x=>(left+right)/2+(x-centerX)*scale;
+  const pz=z=>bottom-z*scale;
+  ctx.font='12px system-ui';ctx.lineWidth=1;
+  const zTick=Math.max(0.5,Math.ceil(view.maxZ/5*2)/2);
+  for(let z=0;z<view.maxZ;z+=zTick){
+    const y=pz(z);ctx.strokeStyle='#1c2d43';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();
+    ctx.fillStyle='#879bb5';ctx.fillText(z.toFixed(1),15,y+4);
+  }
+  const xTick=Math.max(0.5,Math.ceil(spanX/6*2)/2);
+  for(let xx=Math.ceil((centerX-spanX/2)/xTick)*xTick;xx<=centerX+spanX/2;xx+=xTick){
+    const xPixel=px(xx);ctx.strokeStyle='#1c2d43';ctx.beginPath();ctx.moveTo(xPixel,top);ctx.lineTo(xPixel,bottom);ctx.stroke();
+    ctx.fillStyle='#879bb5';ctx.fillText(xx.toFixed(1),xPixel-9,bottom+25);
+  }
+  ctx.fillStyle='#14273e';ctx.fillRect(left,bottom,right-left,8);
+  ctx.strokeStyle='#6ce6ef';ctx.shadowColor='#6ce6ef';ctx.shadowBlur=14;ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(left,bottom);ctx.lineTo(right,bottom);ctx.stroke();ctx.shadowBlur=0;
+  const index=Math.min(samples.length-1,Math.round(currentTime/config.dt)),p=samples[index];
+  const start=Math.max(0,index-Math.round(0.22/config.dt));
+  ctx.strokeStyle='#6ce6ef';ctx.globalAlpha=0.45;ctx.lineWidth=3;ctx.beginPath();
+  for(let j=start;j<=index;j++){const q=samples[j];j===start?ctx.moveTo(px(q.x),pz(q.z)):ctx.lineTo(px(q.x),pz(q.z));}
+  ctx.stroke();ctx.globalAlpha=1;
+  const bx=px(p.x),bz=pz(p.z),proximity=1-Math.min(p.z/(view.maxZ/1.2),1);
+  ctx.fillStyle=`rgba(108,230,239,${0.08+0.25*proximity})`;ctx.beginPath();ctx.ellipse(bx,bottom+4,9+13*proximity,3,0,0,2*Math.PI);ctx.fill();
+  const glow=ctx.createRadialGradient(bx,bz,4,bx,bz,31);
+  glow.addColorStop(0,'rgba(255,133,200,0.3)');glow.addColorStop(1,'rgba(255,133,200,0)');
+  ctx.fillStyle=glow;ctx.beginPath();ctx.arc(bx,bz,31,0,2*Math.PI);ctx.fill();
+  ctx.fillStyle='#ffd0e9';ctx.strokeStyle='#ff85c8';ctx.lineWidth=2;ctx.beginPath();ctx.arc(bx,bz,9,0,2*Math.PI);ctx.fill();ctx.stroke();
+  ctx.fillStyle='white';ctx.beginPath();ctx.arc(bx-3,bz-3,2.5,0,2*Math.PI);ctx.fill();
+  ctx.fillStyle='rgba(8,14,28,0.9)';ctx.fillRect(left+10,top+4,176,77);
+  ctx.font='13px monospace';ctx.fillStyle='#d3e5f8';
+  ctx.fillText(`t    ${currentTime.toFixed(2)} s`,left+22,top+25);
+  ctx.fillText(`z    ${p.z.toFixed(2)} m`,left+22,top+46);
+  ctx.fillText(`v_z  ${p.vz.toFixed(2)} m/s`,left+22,top+67);
+  ctx.font='12px system-ui';ctx.fillStyle='#b7c9df';ctx.fillText('z [m]',15,20);ctx.fillText('x [m]',w/2,h-12);
+  timeSlider.value=currentTime;document.getElementById('clock').textContent=currentTime.toFixed(2)+' s';
+}
+function resize(){const ratio=window.devicePixelRatio||1;canvas.width=Math.round(canvas.clientWidth*ratio);canvas.height=Math.round(canvas.clientHeight*ratio);ctx.setTransform(ratio,0,0,ratio,0,0);draw();}
+function setPlaying(value){playing=value;lastStamp=null;play.textContent=value?'Pause':'Play';play.setAttribute('aria-label',value?'Pause animation':'Play animation');}
+vxControl.addEventListener('input',recalculate);v0.addEventListener('input',recalculate);eps.addEventListener('input',recalculate);
+timeSlider.addEventListener('input',()=>{setPlaying(false);currentTime=Number(timeSlider.value);draw();});
+play.addEventListener('click',()=>{if(currentTime>=config.duration)currentTime=0;setPlaying(!playing);draw();});
+document.getElementById('restart').addEventListener('click',()=>{currentTime=0;lastStamp=null;draw();});
+window.addEventListener('resize',resize);
+function frame(stamp){if(playing){if(lastStamp!==null){currentTime=Math.min(config.duration,currentTime+Math.min((stamp-lastStamp)/1000,0.1));if(currentTime>=config.duration)setPlaying(false);}lastStamp=stamp;draw();}requestAnimationFrame(frame);}
+recalculate();resize();requestAnimationFrame(frame);
+</script></body></html>'''
